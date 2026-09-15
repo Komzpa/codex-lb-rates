@@ -37,14 +37,22 @@ from .const import (
     ATTR_USED_PERCENT,
     ATTR_WINDOW_MINUTES,
     CONF_MODE,
+    CONF_RESET_DISPLAY,
     CONF_RICH_SENSORS,
+    DEFAULT_RESET_DISPLAY,
     DEFAULT_RICH_SENSORS,
     DOMAIN,
     MODE_CODEX_LB,
     POOL_DEVICE_ID,
+    RESET_DISPLAY_ABSOLUTE,
 )
 from .coordinator import CodexRatesCoordinator
-from .models import AccountQuota, ProviderSnapshot, WindowAggregate
+from .models import (
+    AccountQuota,
+    ProviderSnapshot,
+    WindowAggregate,
+    format_reset_countdown,
+)
 
 STATUS_ICONS = {
     "active": "mdi:check-circle-outline",
@@ -85,6 +93,18 @@ def _absolute_reset(when: datetime | None) -> str | None:
     )
 
 
+def _format_reset_display(when: datetime | None, entry: ConfigEntry) -> str | None:
+    """Render reset state from the configured display mode."""
+    mode = entry.options.get(CONF_RESET_DISPLAY, DEFAULT_RESET_DISPLAY)
+    if mode == RESET_DISPLAY_ABSOLUTE:
+        return _absolute_reset(when)
+    return format_reset_countdown(when)
+
+
+def _is_reset_window_key(key: str) -> bool:
+    return key.startswith("reset_") and key != "reset_credits"
+
+
 ACCOUNT_SENSORS: tuple[CodexRatesSensorDescription, ...] = (
     CodexRatesSensorDescription(
         key="remaining_5h",
@@ -122,7 +142,7 @@ ACCOUNT_SENSORS: tuple[CodexRatesSensorDescription, ...] = (
         icon="mdi:calendar-clock",
         translation_key="reset_5h",
         name="5h resets",
-        value_fn=lambda a: _absolute_reset(a.reset_5h),
+        value_fn=lambda a: a.reset_5h,
         attrs_fn=lambda a: _reset_attrs(a.reset_5h, a),
     ),
     CodexRatesSensorDescription(
@@ -130,7 +150,7 @@ ACCOUNT_SENSORS: tuple[CodexRatesSensorDescription, ...] = (
         icon="mdi:calendar-clock",
         translation_key="reset_weekly",
         name="Weekly resets",
-        value_fn=lambda a: _absolute_reset(a.reset_weekly),
+        value_fn=lambda a: a.reset_weekly,
         attrs_fn=lambda a: _reset_attrs(a.reset_weekly, a),
     ),
     CodexRatesSensorDescription(
@@ -138,7 +158,7 @@ ACCOUNT_SENSORS: tuple[CodexRatesSensorDescription, ...] = (
         icon="mdi:calendar-clock",
         translation_key="reset_monthly",
         name="Monthly resets",
-        value_fn=lambda a: _absolute_reset(a.reset_monthly),
+        value_fn=lambda a: a.reset_monthly,
         attrs_fn=lambda a: _reset_attrs(a.reset_monthly, a),
         codex_lb_only=True,
     ),
@@ -185,7 +205,7 @@ ACCOUNT_SENSORS: tuple[CodexRatesSensorDescription, ...] = (
         icon="mdi:calendar-clock",
         translation_key="reset_spark_5h",
         name="Spark 5h resets",
-        value_fn=lambda a: _absolute_reset(a.reset_spark_5h),
+        value_fn=lambda a: a.reset_spark_5h,
         attrs_fn=lambda a: _reset_attrs(a.reset_spark_5h, a),
         codex_lb_only=True,
     ),
@@ -194,7 +214,7 @@ ACCOUNT_SENSORS: tuple[CodexRatesSensorDescription, ...] = (
         icon="mdi:calendar-clock",
         translation_key="reset_spark_weekly",
         name="Spark weekly resets",
-        value_fn=lambda a: _absolute_reset(a.reset_spark_weekly),
+        value_fn=lambda a: a.reset_spark_weekly,
         attrs_fn=lambda a: _reset_attrs(a.reset_spark_weekly, a),
         codex_lb_only=True,
     ),
@@ -595,7 +615,12 @@ class CodexAccountSensor(CoordinatorEntity[CodexRatesCoordinator], SensorEntity)
         account = _account_from_data(self.coordinator.data, self.account_id)
         if account is None:
             return None
-        return self.entity_description.value_fn(account)  # type: ignore[attr-defined]
+        value = self.entity_description.value_fn(account)  # type: ignore[attr-defined]
+        if _is_reset_window_key(self.entity_description.key):
+            return _format_reset_display(
+                value if isinstance(value, datetime) else None, self._entry
+            )
+        return value
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:

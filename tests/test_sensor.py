@@ -27,17 +27,67 @@ from custom_components.codex_rates.sensor import (
 )
 
 
-def test_reset_is_absolute_in_ha_timezone(monkeypatch) -> None:
+def test_reset_display_toggle_countdown_and_absolute(monkeypatch) -> None:
     from homeassistant.util import dt as dt_util
 
-    from custom_components.codex_rates.sensor import _absolute_reset, _reset_attrs
+    import custom_components.codex_rates.models as models_mod
+    from custom_components.codex_rates.const import (
+        CONF_RESET_DISPLAY,
+        RESET_DISPLAY_ABSOLUTE,
+        RESET_DISPLAY_COUNTDOWN,
+    )
+    from custom_components.codex_rates.models import format_reset_countdown
+    from custom_components.codex_rates.sensor import (
+        ACCOUNT_SENSORS,
+        CodexAccountSensor,
+        _absolute_reset,
+        _format_reset_display,
+        _reset_attrs,
+    )
 
     monkeypatch.setattr(dt_util, "DEFAULT_TIME_ZONE", ZoneInfo("Asia/Tbilisi"))
     when = datetime(2026, 9, 19, 23, 30, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 19, 20, 0, tzinfo=timezone.utc)
+
+    class _FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now if tz is None else now.astimezone(tz)
+
+    monkeypatch.setattr(models_mod, "datetime", _FixedDateTime)
+
     assert _absolute_reset(when) == "2026-09-20 03:30"
+    assert format_reset_countdown(when, now=now) == "4h"
     attrs = _reset_attrs(when, AccountQuota(account_id="a"))
     assert attrs["resets_at"] == "2026-09-19T23:30:00+00:00"
     assert attrs["reset_timezone"] == "Asia/Tbilisi"
+
+    absolute_entry = SimpleNamespace(
+        entry_id="test", options={CONF_RESET_DISPLAY: RESET_DISPLAY_ABSOLUTE}
+    )
+    countdown_entry = SimpleNamespace(
+        entry_id="test", options={CONF_RESET_DISPLAY: RESET_DISPLAY_COUNTDOWN}
+    )
+    default_entry = SimpleNamespace(entry_id="test", options={})
+    assert _format_reset_display(when, absolute_entry) == "2026-09-20 03:30"
+    assert _format_reset_display(when, countdown_entry) == "4h"
+    assert _format_reset_display(when, default_entry) == "4h"
+
+    description = next(d for d in ACCOUNT_SENSORS if d.key == "reset_5h")
+    account = AccountQuota(account_id="a", reset_5h=when)
+    coordinator = SimpleNamespace(data=ProviderSnapshot(accounts=[account]))
+    assert (
+        CodexAccountSensor(coordinator, absolute_entry, "a", description).native_value
+        == "2026-09-20 03:30"
+    )
+    assert (
+        CodexAccountSensor(coordinator, countdown_entry, "a", description).native_value
+        == "4h"
+    )
+    assert (
+        CodexAccountSensor(coordinator, default_entry, "a", description).native_value
+        == "4h"
+    )
 
 
 def test_status_keeps_machine_codes_and_distinct_action_icons() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from math import isfinite
 from typing import Any
 from urllib.parse import urljoin
 
@@ -16,6 +17,7 @@ from ..models import (
     ProviderSnapshot,
     compute_pool_aggregate,
     parse_iso_datetime,
+    remaining_from_used,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -84,7 +86,9 @@ class CodexLbProvider:
             for item in accounts_raw
             if isinstance(item, dict) and _include_account(item)
         ]
-        return ProviderSnapshot(accounts=accounts, pool=compute_pool_aggregate(accounts))
+        return ProviderSnapshot(
+            accounts=accounts, pool=compute_pool_aggregate(accounts)
+        )
 
     async def _async_login(self) -> None:
         """Establish dashboard session (admin password/TOTP or guest)."""
@@ -137,9 +141,12 @@ class CodexLbProvider:
             )
         )
         if not guest_enabled and (
-            "guestAccessEnabled" in session_state or "guest_access_enabled" in session_state
+            "guestAccessEnabled" in session_state
+            or "guest_access_enabled" in session_state
         ):
-            raise CodexRatesAuthError("Codex-LB guest access is disabled on this server")
+            raise CodexRatesAuthError(
+                "Codex-LB guest access is disabled on this server"
+            )
         if guest_password_required and not self._password:
             raise CodexRatesAuthError("Codex-LB guest password is required")
 
@@ -154,13 +161,17 @@ class CodexLbProvider:
             data = await _safe_json(resp)
             self._capture_cookies(resp)
             if resp.status >= 400:
-                raise CodexRatesAuthError(_lb_error(data, "Codex-LB guest login failed"))
+                raise CodexRatesAuthError(
+                    _lb_error(data, "Codex-LB guest login failed")
+                )
 
         if data and _first(data, "authenticated") is False:
             raise CodexRatesAuthError("Codex-LB guest login was not authenticated")
 
         if not self._cookie:
-            _LOGGER.debug("Codex-LB guest login completed; relying on session cookie jar")
+            _LOGGER.debug(
+                "Codex-LB guest login completed; relying on session cookie jar"
+            )
 
     async def _async_admin_login(
         self, session_state: dict[str, Any], *, totp_required: bool
@@ -360,7 +371,9 @@ class CodexLbProvider:
             ),
             remaining_spark_5h=_remaining_from_window(spark_primary),
             remaining_spark_weekly=_remaining_from_window(spark_secondary),
-            used_spark_5h=_as_float(_first(spark_primary, "used_percent", "usedPercent")),
+            used_spark_5h=_as_float(
+                _first(spark_primary, "used_percent", "usedPercent")
+            ),
             used_spark_weekly=_as_float(
                 _first(spark_secondary, "used_percent", "usedPercent")
             ),
@@ -400,7 +413,7 @@ def _remaining_from_usage(
     if remaining is None:
         used = _as_float(_first(usage, used_snake, used_camel))
         if used is not None:
-            remaining = round(100.0 - used, 2)
+            remaining = remaining_from_used(used)
     return remaining
 
 
@@ -431,7 +444,14 @@ def _quota_window(quota: dict[str, Any], *keys: str) -> dict[str, Any]:
 
 
 def _remaining_from_window(window: dict[str, Any]) -> float | None:
-    return _remaining_from_usage(window, {}, "remaining_percent", "remainingPercent", "used_percent", "usedPercent")
+    return _remaining_from_usage(
+        window,
+        {},
+        "remaining_percent",
+        "remainingPercent",
+        "used_percent",
+        "usedPercent",
+    )
 
 
 def _first(data: dict[str, Any] | None, *keys: str) -> Any:
@@ -448,7 +468,8 @@ def _as_float(value: Any) -> float | None:
     if value is None:
         return None
     try:
-        return float(value)
+        result = float(value)
+        return result if isfinite(result) else None
     except (TypeError, ValueError):
         return None
 

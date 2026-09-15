@@ -9,8 +9,8 @@ Home Assistant integration for **Codex 5-hour** and **weekly** quota remaining�
 
 ## Features
 
-- **Codex-LB pool monitoring** — every pooled account as its own device, plus pool gauges (mean remaining % for 5h / weekly / monthly across active accounts)
-- **Per-account sensors** — remaining %, `Xd XXh` reset countdowns, reset credits, status (rich sensors optional)
+- **Codex-LB pool monitoring** — every pooled account as its own device, plus pool gauges (capacity-weighted remaining % for 5h / weekly / monthly across all accounts)
+- **Per-account sensors** — remaining %, absolute reset dates and times, reset credits, status (rich sensors optional)
 - **ChatGPT / Codex CLI** — device-code OAuth, browser paste-callback, `auth.json`, or advanced tokens
 - Secrets stay in the config entry (password inputs, redacted diagnostics)
 
@@ -33,9 +33,9 @@ Home Assistant integration for **Codex 5-hour** and **weekly** quota remaining�
 
 You get:
 
-- Per-account sensors: 5h / weekly / monthly remaining %, reset countdowns (`Xd XXh` with `resets_at` attribute), **reset credits**, status
+- Per-account sensors: 5h / weekly / monthly remaining %, absolute reset dates in Home Assistant’s timezone (with the exact ISO timestamp in `resets_at`), **reset credits**, status
 - Optional rich sensors: plan, credits balance, last refresh
-- Pool device: mean remaining % for 5h, weekly, and monthly across active accounts (attributes include min/max/counts; when window lengths differ, mean prefers the most common duration and exposes `by_minutes`)
+- Pool device: capacity-weighted remaining % for 5h, weekly, and monthly across all accounts, including exhausted accounts at 0%. Weights come from Codex-LB’s `capacityCreditsPrimary`, `capacityCreditsSecondary`, and `capacityCreditsMonthly`, so account plans contribute in proportion to their quota capacity.
 - Stale account devices from older identifier formats are pruned automatically after upgrade/reload
 
 > Codex-LB **API keys cannot** read account quotas — the accounts API requires dashboard session auth.
@@ -51,7 +51,7 @@ Use this when you are not running Codex-LB and still want 5h / weekly / **reset 
 | **auth.json** | Bind-mount `~/.codex/auth.json` into HA and point at the path |
 | **Paste tokens** | Advanced / last resort |
 
-Tokens are stored in the config entry (not YAML). Refresh tokens renew access automatically when possible. Add the integration again for another account. Reload the integration after upgrading so reset sensors switch from fuzzy timestamps to `Xd XXh` countdowns and orphan devices are cleaned up.
+Tokens are stored in the config entry (not YAML). Refresh tokens renew access automatically when possible. Add the integration again for another account. Restart Home Assistant after upgrading the Python integration. Existing entity IDs remain stable; reset states change to `YYYY-MM-DD HH:MM` in Home Assistant’s configured timezone, while `resets_at` retains the machine-readable timestamp. Status codes remain stable for automations and receive readable labels and icons in the UI.
 
 ## Options
 

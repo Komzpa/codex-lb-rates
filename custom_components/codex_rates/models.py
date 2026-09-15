@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from math import isfinite
 from typing import Any
 
 
@@ -59,7 +60,7 @@ class WindowAggregate:
     min: float | None
     max: float | None
     sample_count: int
-    # Most common window length among samples (minutes); None if unknown/mixed evenly.
+    # Shared window length in minutes; None if unknown or mixed.
     window_minutes: int | None = None
     # Mean remaining % keyed by window length when more than one duration is present.
     by_minutes: dict[int, float] = field(default_factory=dict)
@@ -97,16 +98,10 @@ def _window_aggregate(
     if not values:
         return WindowAggregate(mean=None, min=None, max=None, sample_count=0)
 
-    by_minutes: dict[int, list[float]] = {}
-    if minutes is not None and len(minutes) == len(values):
-        for value, mins in zip(values, minutes, strict=True):
-            if mins is None:
-                continue
-            by_minutes.setdefault(mins, []).append(value)
-
-    valid_capacities = capacities or []
+    valid_capacities = capacities if capacities is not None else [None] * len(values)
     missing_weight_count = sum(
-        capacity is None or capacity <= 0 for capacity in valid_capacities
+        capacity is None or not isfinite(capacity) or capacity <= 0
+        for capacity in valid_capacities
     )
     if len(valid_capacities) != len(values) or missing_weight_count:
         weights = [1.0] * len(values)
@@ -114,9 +109,20 @@ def _window_aggregate(
     else:
         weights = [float(capacity) for capacity in valid_capacities]
         weighting_method = "capacity_credits"
-    duration_means = {
-        mins: round(sum(group) / len(group), 2) for mins, group in by_minutes.items()
-    }
+    by_minutes: dict[int, list[int]] = {}
+    if minutes is not None:
+        for index, mins in enumerate(minutes):
+            if mins is not None:
+                by_minutes.setdefault(mins, []).append(index)
+
+    def mean(indices: list[int]) -> float:
+        return round(
+            sum(values[i] * weights[i] for i in indices)
+            / sum(weights[i] for i in indices),
+            2,
+        )
+
+    duration_means = {mins: mean(indices) for mins, indices in by_minutes.items()}
 
     # Keep every measured window in the pool.  A duration disagreement is useful
     # context, not a reason to silently omit quota from another account type.
@@ -127,13 +133,15 @@ def _window_aggregate(
             modal_minutes = None
 
     return WindowAggregate(
-        mean=round(sum(value * weight for value, weight in zip(values, weights, strict=True)) / sum(weights), 2),
+        mean=mean(list(range(len(values)))),
         min=round(min(values), 2),
         max=round(max(values), 2),
         sample_count=len(values),
         window_minutes=modal_minutes,
         by_minutes=duration_means if len(duration_means) > 1 else {},
-        weighted_capacity=round(sum(weights), 2),
+        weighted_capacity=round(sum(weights), 2)
+        if weighting_method == "capacity_credits"
+        else None,
         weighting_method=weighting_method,
         missing_weight_count=missing_weight_count,
     )
@@ -153,28 +161,44 @@ def compute_pool_aggregate(accounts: list[AccountQuota]) -> PoolAggregate:
         capacities: list[float | None] = []
         for account in accounts:
             remaining = getter_remaining(account)
-            if remaining is None:
+            if remaining is None or not isfinite(remaining):
                 continue
             vals.append(remaining)
             mins.append(getter_minutes(account))
             capacities.append(getter_capacity(account))
         return vals, mins, capacities
 
-    five, five_m, five_c = _pairs(lambda a: a.remaining_5h, lambda a: a.window_minutes_5h, lambda a: a.capacity_5h)
+    five, five_m, five_c = _pairs(
+        lambda a: a.remaining_5h, lambda a: a.window_minutes_5h, lambda a: a.capacity_5h
+    )
     weekly, weekly_m, weekly_c = _pairs(
-        lambda a: a.remaining_weekly, lambda a: a.window_minutes_weekly, lambda a: a.capacity_weekly
+        lambda a: a.remaining_weekly,
+        lambda a: a.window_minutes_weekly,
+        lambda a: a.capacity_weekly,
     )
     monthly, monthly_m, monthly_c = _pairs(
-        lambda a: a.remaining_monthly, lambda a: a.window_minutes_monthly, lambda a: a.capacity_monthly
+        lambda a: a.remaining_monthly,
+        lambda a: a.window_minutes_monthly,
+        lambda a: a.capacity_monthly,
     )
-    spark_five, spark_five_m, spark_five_c = _pairs(lambda a: a.remaining_spark_5h, lambda a: a.window_minutes_spark_5h, lambda a: a.capacity_5h)
-    spark_weekly, spark_weekly_m, spark_weekly_c = _pairs(lambda a: a.remaining_spark_weekly, lambda a: a.window_minutes_spark_weekly, lambda a: a.capacity_weekly)
+    spark_five, spark_five_m, spark_five_c = _pairs(
+        lambda a: a.remaining_spark_5h,
+        lambda a: a.window_minutes_spark_5h,
+        lambda a: a.capacity_5h,
+    )
+    spark_weekly, spark_weekly_m, spark_weekly_c = _pairs(
+        lambda a: a.remaining_spark_weekly,
+        lambda a: a.window_minutes_spark_weekly,
+        lambda a: a.capacity_weekly,
+    )
     return PoolAggregate(
         remaining_5h=_window_aggregate(five, five_m, five_c),
         remaining_weekly=_window_aggregate(weekly, weekly_m, weekly_c),
         remaining_monthly=_window_aggregate(monthly, monthly_m, monthly_c),
         remaining_spark_5h=_window_aggregate(spark_five, spark_five_m, spark_five_c),
-        remaining_spark_weekly=_window_aggregate(spark_weekly, spark_weekly_m, spark_weekly_c),
+        remaining_spark_weekly=_window_aggregate(
+            spark_weekly, spark_weekly_m, spark_weekly_c
+        ),
         account_count=len(accounts),
         active_count=len(active),
     )
@@ -187,7 +211,7 @@ def remaining_from_used(used_percent: float | None) -> float | None:
     return round(max(0.0, min(100.0, 100.0 - float(used_percent))), 2)
 
 
-def parse_iso_datetime(value: str | int | float | None) -> datetime | None:
+def parse_iso_datetime(value: str | float | None) -> datetime | None:
     """Parse ISO-8601 or unix timestamp into timezone-aware UTC datetime."""
     if value is None:
         return None
@@ -206,25 +230,3 @@ def parse_iso_datetime(value: str | int | float | None) -> datetime | None:
         return dt
     except ValueError:
         return None
-
-
-def format_reset_countdown(
-    when: datetime | None, *, now: datetime | None = None
-) -> str | None:
-    """Format time until reset as ``Xd XXh`` / ``Xh`` (hours granularity)."""
-    if when is None:
-        return None
-    current = now or datetime.now(timezone.utc)
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
-    if current.tzinfo is None:
-        current = current.replace(tzinfo=timezone.utc)
-    seconds = int((when - current).total_seconds())
-    if seconds <= 0:
-        return "0h"
-    # Ceil to whole hours so short remainders don't show as 0h early.
-    hours_total = (seconds + 3599) // 3600
-    days, hours = divmod(hours_total, 24)
-    if days >= 1:
-        return f"{days}d {hours}h"
-    return f"{hours}h"

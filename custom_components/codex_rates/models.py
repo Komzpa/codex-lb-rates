@@ -32,6 +32,17 @@ class AccountQuota:
     reset_credits: int | None = None
     reset_credits_expire_at: datetime | None = None
     last_refresh_at: datetime | None = None
+    capacity_5h: float | None = None
+    capacity_weekly: float | None = None
+    capacity_monthly: float | None = None
+    remaining_spark_5h: float | None = None
+    remaining_spark_weekly: float | None = None
+    used_spark_5h: float | None = None
+    used_spark_weekly: float | None = None
+    reset_spark_5h: datetime | None = None
+    reset_spark_weekly: datetime | None = None
+    window_minutes_spark_5h: int | None = None
+    window_minutes_spark_weekly: int | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -52,6 +63,9 @@ class WindowAggregate:
     window_minutes: int | None = None
     # Mean remaining % keyed by window length when more than one duration is present.
     by_minutes: dict[int, float] = field(default_factory=dict)
+    weighted_capacity: float | None = None
+    weighting_method: str = "equal"
+    missing_weight_count: int = 0
 
 
 @dataclass(slots=True)
@@ -61,6 +75,8 @@ class PoolAggregate:
     remaining_5h: WindowAggregate
     remaining_weekly: WindowAggregate
     remaining_monthly: WindowAggregate
+    remaining_spark_5h: WindowAggregate
+    remaining_spark_weekly: WindowAggregate
     account_count: int
     active_count: int
 
@@ -76,6 +92,7 @@ class ProviderSnapshot:
 def _window_aggregate(
     values: list[float],
     minutes: list[int | None] | None = None,
+    capacities: list[float | None] | None = None,
 ) -> WindowAggregate:
     if not values:
         return WindowAggregate(mean=None, min=None, max=None, sample_count=0)
@@ -87,57 +104,77 @@ def _window_aggregate(
                 continue
             by_minutes.setdefault(mins, []).append(value)
 
+    valid_capacities = capacities or []
+    missing_weight_count = sum(
+        capacity is None or capacity <= 0 for capacity in valid_capacities
+    )
+    if len(valid_capacities) != len(values) or missing_weight_count:
+        weights = [1.0] * len(values)
+        weighting_method = "equal_missing_capacity"
+    else:
+        weights = [float(capacity) for capacity in valid_capacities]
+        weighting_method = "capacity_credits"
     duration_means = {
         mins: round(sum(group) / len(group), 2) for mins, group in by_minutes.items()
     }
 
-    # Prefer the dominant duration's mean when accounts disagree on window length
-    # (e.g. mixed plan windows in the same slot). Fall back to all samples.
+    # Keep every measured window in the pool.  A duration disagreement is useful
+    # context, not a reason to silently omit quota from another account type.
     modal_minutes: int | None = None
-    mean_values = values
     if by_minutes:
         modal_minutes = max(by_minutes.items(), key=lambda item: len(item[1]))[0]
         if len(by_minutes) > 1:
-            mean_values = by_minutes[modal_minutes]
+            modal_minutes = None
 
     return WindowAggregate(
-        mean=round(sum(mean_values) / len(mean_values), 2),
+        mean=round(sum(value * weight for value, weight in zip(values, weights, strict=True)) / sum(weights), 2),
         min=round(min(values), 2),
         max=round(max(values), 2),
         sample_count=len(values),
         window_minutes=modal_minutes,
         by_minutes=duration_means if len(duration_means) > 1 else {},
+        weighted_capacity=round(sum(weights), 2),
+        weighting_method=weighting_method,
+        missing_weight_count=missing_weight_count,
     )
 
 
 def compute_pool_aggregate(accounts: list[AccountQuota]) -> PoolAggregate:
-    """Mean/min/max remaining % across active accounts only."""
+    """Capacity-weighted remaining % across every account with a measured window."""
     active = [a for a in accounts if (a.status or "").lower() == "active"]
 
     def _pairs(
-        getter_remaining: Any, getter_minutes: Any
-    ) -> tuple[list[float], list[int | None]]:
+        getter_remaining: Any,
+        getter_minutes: Any,
+        getter_capacity: Any,
+    ) -> tuple[list[float], list[int | None], list[float | None]]:
         vals: list[float] = []
         mins: list[int | None] = []
-        for account in active:
+        capacities: list[float | None] = []
+        for account in accounts:
             remaining = getter_remaining(account)
             if remaining is None:
                 continue
             vals.append(remaining)
             mins.append(getter_minutes(account))
-        return vals, mins
+            capacities.append(getter_capacity(account))
+        return vals, mins, capacities
 
-    five, five_m = _pairs(lambda a: a.remaining_5h, lambda a: a.window_minutes_5h)
-    weekly, weekly_m = _pairs(
-        lambda a: a.remaining_weekly, lambda a: a.window_minutes_weekly
+    five, five_m, five_c = _pairs(lambda a: a.remaining_5h, lambda a: a.window_minutes_5h, lambda a: a.capacity_5h)
+    weekly, weekly_m, weekly_c = _pairs(
+        lambda a: a.remaining_weekly, lambda a: a.window_minutes_weekly, lambda a: a.capacity_weekly
     )
-    monthly, monthly_m = _pairs(
-        lambda a: a.remaining_monthly, lambda a: a.window_minutes_monthly
+    monthly, monthly_m, monthly_c = _pairs(
+        lambda a: a.remaining_monthly, lambda a: a.window_minutes_monthly, lambda a: a.capacity_monthly
     )
+    spark_five, spark_five_m, spark_five_c = _pairs(lambda a: a.remaining_spark_5h, lambda a: a.window_minutes_spark_5h, lambda a: a.capacity_5h)
+    spark_weekly, spark_weekly_m, spark_weekly_c = _pairs(lambda a: a.remaining_spark_weekly, lambda a: a.window_minutes_spark_weekly, lambda a: a.capacity_weekly)
     return PoolAggregate(
-        remaining_5h=_window_aggregate(five, five_m),
-        remaining_weekly=_window_aggregate(weekly, weekly_m),
-        remaining_monthly=_window_aggregate(monthly, monthly_m),
+        remaining_5h=_window_aggregate(five, five_m, five_c),
+        remaining_weekly=_window_aggregate(weekly, weekly_m, weekly_c),
+        remaining_monthly=_window_aggregate(monthly, monthly_m, monthly_c),
+        remaining_spark_5h=_window_aggregate(spark_five, spark_five_m, spark_five_c),
+        remaining_spark_weekly=_window_aggregate(spark_weekly, spark_weekly_m, spark_weekly_c),
         account_count=len(accounts),
         active_count=len(active),
     )

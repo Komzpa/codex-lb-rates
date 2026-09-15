@@ -152,7 +152,7 @@ def test_cleanup_orphan_devices_removes_stale() -> None:
             self.removed.append(entity_id)
 
     entry = SimpleNamespace(entry_id="entry1", data={CONF_MODE: MODE_CODEX_LB}, options={})
-    snapshot = ProviderSnapshot(accounts=[AccountQuota(account_id="acc_live")])
+    snapshot = ProviderSnapshot(accounts=[AccountQuota(account_id="acc_live", remaining_5h=50)])
     hass = SimpleNamespace()
     device_reg = FakeDeviceRegistry()
     entity_reg = FakeEntityRegistry()
@@ -202,7 +202,7 @@ def test_cleanup_removes_chatgpt_monthly_entities() -> None:
             raise AssertionError("should not remove devices")
 
     entry = SimpleNamespace(entry_id="entry1", data={CONF_MODE: MODE_CHATGPT}, options={})
-    snapshot = ProviderSnapshot(accounts=[AccountQuota(account_id="acc1")])
+    snapshot = ProviderSnapshot(accounts=[AccountQuota(account_id="acc1", remaining_5h=50)])
     hass = SimpleNamespace()
     entity_reg = FakeEntityRegistry()
     device_reg = FakeDeviceRegistry()
@@ -248,7 +248,7 @@ def test_cleanup_removes_lb_monthly_when_api_omits_monthly() -> None:
             raise AssertionError("should not remove devices")
 
     entry = SimpleNamespace(entry_id="entry1", data={CONF_MODE: MODE_CODEX_LB}, options={})
-    snapshot = ProviderSnapshot(accounts=[AccountQuota(account_id="acc1")])
+    snapshot = ProviderSnapshot(accounts=[AccountQuota(account_id="acc1", remaining_5h=50)])
     hass = SimpleNamespace()
     entity_reg = FakeEntityRegistry()
     device_reg = FakeDeviceRegistry()

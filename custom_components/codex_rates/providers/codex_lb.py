@@ -303,6 +303,9 @@ class CodexLbProvider:
         reset_credits = _as_int(
             _first(item, "available_reset_credits", "availableResetCredits")
         )
+        spark = _spark_quota(item)
+        spark_primary = _quota_window(spark, "primary_window", "primaryWindow")
+        spark_secondary = _quota_window(spark, "secondary_window", "secondaryWindow")
 
         return AccountQuota(
             account_id=account_id,
@@ -346,6 +349,33 @@ class CodexLbProvider:
             last_refresh_at=parse_iso_datetime(
                 _first(item, "last_refresh_at", "lastRefreshAt")
             ),
+            capacity_5h=_as_float(
+                _first(item, "capacity_credits_primary", "capacityCreditsPrimary")
+            ),
+            capacity_weekly=_as_float(
+                _first(item, "capacity_credits_secondary", "capacityCreditsSecondary")
+            ),
+            capacity_monthly=_as_float(
+                _first(item, "capacity_credits_monthly", "capacityCreditsMonthly")
+            ),
+            remaining_spark_5h=_remaining_from_window(spark_primary),
+            remaining_spark_weekly=_remaining_from_window(spark_secondary),
+            used_spark_5h=_as_float(_first(spark_primary, "used_percent", "usedPercent")),
+            used_spark_weekly=_as_float(
+                _first(spark_secondary, "used_percent", "usedPercent")
+            ),
+            reset_spark_5h=parse_iso_datetime(
+                _first(spark_primary, "reset_at", "resetAt")
+            ),
+            reset_spark_weekly=parse_iso_datetime(
+                _first(spark_secondary, "reset_at", "resetAt")
+            ),
+            window_minutes_spark_5h=_as_int(
+                _first(spark_primary, "window_minutes", "windowMinutes")
+            ),
+            window_minutes_spark_weekly=_as_int(
+                _first(spark_secondary, "window_minutes", "windowMinutes")
+            ),
         )
 
 
@@ -378,6 +408,30 @@ def _used_from_remaining(remaining: float | None) -> float | None:
     if remaining is None:
         return None
     return round(100.0 - remaining, 2)
+
+
+def _spark_quota(item: dict[str, Any]) -> dict[str, Any]:
+    """Find the Codex Spark additional quota without assuming its array position."""
+    quotas = _first(item, "additional_quotas", "additionalQuotas")
+    if not isinstance(quotas, list):
+        return {}
+    for quota in quotas:
+        if not isinstance(quota, dict):
+            continue
+        key = str(_first(quota, "quota_key", "quotaKey") or "").lower()
+        feature = str(_first(quota, "metered_feature", "meteredFeature") or "").lower()
+        if key == "codex_spark" or feature == "codex_bengalfox":
+            return quota
+    return {}
+
+
+def _quota_window(quota: dict[str, Any], *keys: str) -> dict[str, Any]:
+    value = _first(quota, *keys)
+    return value if isinstance(value, dict) else {}
+
+
+def _remaining_from_window(window: dict[str, Any]) -> float | None:
+    return _remaining_from_usage(window, {}, "remaining_percent", "remainingPercent", "used_percent", "usedPercent")
 
 
 def _first(data: dict[str, Any] | None, *keys: str) -> Any:

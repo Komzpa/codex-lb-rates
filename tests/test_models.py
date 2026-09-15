@@ -39,7 +39,7 @@ def test_format_reset_countdown() -> None:
     )
 
 
-def test_pool_aggregate_active_only_skips_null() -> None:
+def test_pool_aggregate_includes_exhausted_accounts_and_skips_unknown() -> None:
     accounts = [
         AccountQuota(account_id="a", status="active", remaining_5h=80, remaining_weekly=90),
         AccountQuota(account_id="b", status="active", remaining_5h=60, remaining_weekly=None),
@@ -49,16 +49,16 @@ def test_pool_aggregate_active_only_skips_null() -> None:
     pool = compute_pool_aggregate(accounts)
     assert pool.account_count == 4
     assert pool.active_count == 3
-    assert pool.remaining_5h.mean == 70.0
-    assert pool.remaining_5h.min == 60.0
+    assert pool.remaining_5h.mean == 50.0
+    assert pool.remaining_5h.min == 10.0
     assert pool.remaining_5h.max == 80.0
-    assert pool.remaining_5h.sample_count == 2
-    assert pool.remaining_weekly.mean == 80.0
-    assert pool.remaining_weekly.sample_count == 2
+    assert pool.remaining_5h.sample_count == 3
+    assert pool.remaining_weekly.mean == 56.67
+    assert pool.remaining_weekly.sample_count == 3
     assert pool.remaining_monthly.mean is None
 
 
-def test_pool_aggregate_prefers_dominant_window_minutes() -> None:
+def test_pool_aggregate_keeps_mixed_window_durations_visible() -> None:
     accounts = [
         AccountQuota(
             account_id="a",
@@ -84,8 +84,21 @@ def test_pool_aggregate_prefers_dominant_window_minutes() -> None:
         ),
     ]
     pool = compute_pool_aggregate(accounts)
-    assert pool.remaining_5h.window_minutes == 300
-    assert pool.remaining_5h.mean == 70.0  # dominant 300-minute group only
+    assert pool.remaining_5h.window_minutes is None
+    assert pool.remaining_5h.mean == 50.0
     assert pool.remaining_5h.by_minutes == {300: 70.0, 10080: 10.0}
     assert pool.remaining_monthly.mean == 45.0
     assert pool.remaining_monthly.window_minutes == 43200
+
+
+def test_pool_aggregate_weights_by_server_capacity_and_preserves_zero() -> None:
+    pool = compute_pool_aggregate(
+        [
+            AccountQuota(account_id="pro", remaining_5h=0, capacity_5h=1500),
+            AccountQuota(account_id="team", remaining_5h=100, capacity_5h=225),
+            AccountQuota(account_id="unknown", remaining_5h=None, capacity_5h=1500),
+        ]
+    )
+    assert pool.remaining_5h.mean == 13.04
+    assert pool.remaining_5h.sample_count == 2
+    assert pool.remaining_5h.weighted_capacity == 1725

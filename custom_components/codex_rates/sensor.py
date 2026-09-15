@@ -42,7 +42,7 @@ from .const import (
     POOL_DEVICE_ID,
 )
 from .coordinator import CodexRatesCoordinator
-from .models import AccountQuota, ProviderSnapshot, WindowAggregate, format_reset_countdown
+from .models import AccountQuota, ProviderSnapshot, WindowAggregate
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -62,7 +62,13 @@ def _reset_attrs(when: datetime | None, account: AccountQuota) -> dict[str, Any]
     }
     if when is not None:
         attrs[ATTR_RESETS_AT] = when.isoformat()
+        attrs["reset_timezone"] = when.astimezone().tzname()
     return attrs
+
+
+def _absolute_reset(when: datetime | None) -> str | None:
+    """Render a fixed local date/time; HA timestamp rows are relative by default."""
+    return when.astimezone().strftime("%Y-%m-%d %H:%M") if when is not None else None
 
 
 ACCOUNT_SENSORS: tuple[CodexRatesSensorDescription, ...] = (
@@ -98,21 +104,21 @@ ACCOUNT_SENSORS: tuple[CodexRatesSensorDescription, ...] = (
         key="reset_5h",
         translation_key="reset_5h",
         name="5h resets",
-        value_fn=lambda a: format_reset_countdown(a.reset_5h),
+        value_fn=lambda a: _absolute_reset(a.reset_5h),
         attrs_fn=lambda a: _reset_attrs(a.reset_5h, a),
     ),
     CodexRatesSensorDescription(
         key="reset_weekly",
         translation_key="reset_weekly",
         name="Weekly resets",
-        value_fn=lambda a: format_reset_countdown(a.reset_weekly),
+        value_fn=lambda a: _absolute_reset(a.reset_weekly),
         attrs_fn=lambda a: _reset_attrs(a.reset_weekly, a),
     ),
     CodexRatesSensorDescription(
         key="reset_monthly",
         translation_key="reset_monthly",
         name="Monthly resets",
-        value_fn=lambda a: format_reset_countdown(a.reset_monthly),
+        value_fn=lambda a: _absolute_reset(a.reset_monthly),
         attrs_fn=lambda a: _reset_attrs(a.reset_monthly, a),
         codex_lb_only=True,
     ),
@@ -120,7 +126,30 @@ ACCOUNT_SENSORS: tuple[CodexRatesSensorDescription, ...] = (
         key="status",
         translation_key="status",
         name="Status",
-        value_fn=lambda a: a.status,
+        value_fn=lambda a: _friendly_status(a.status),
+        attrs_fn=lambda a: {ATTR_ACCOUNT_ID: a.account_id, ATTR_EMAIL: a.email, "raw_status": a.status},
+    ),
+    CodexRatesSensorDescription(
+        key="remaining_spark_5h", translation_key="remaining_spark_5h", name="GPT-5.3 Codex Spark 5h remaining",
+        native_unit_of_measurement=PERCENTAGE, state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda a: a.remaining_spark_5h,
+        attrs_fn=lambda a: _pct_attrs(a.used_spark_5h, a.window_minutes_spark_5h, a), codex_lb_only=True,
+    ),
+    CodexRatesSensorDescription(
+        key="remaining_spark_weekly", translation_key="remaining_spark_weekly", name="GPT-5.3 Codex Spark weekly remaining",
+        native_unit_of_measurement=PERCENTAGE, state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda a: a.remaining_spark_weekly,
+        attrs_fn=lambda a: _pct_attrs(a.used_spark_weekly, a.window_minutes_spark_weekly, a), codex_lb_only=True,
+    ),
+    CodexRatesSensorDescription(
+        key="reset_spark_5h", translation_key="reset_spark_5h", name="GPT-5.3 Codex Spark 5h resets",
+        value_fn=lambda a: _absolute_reset(a.reset_spark_5h),
+        attrs_fn=lambda a: _reset_attrs(a.reset_spark_5h, a), codex_lb_only=True,
+    ),
+    CodexRatesSensorDescription(
+        key="reset_spark_weekly", translation_key="reset_spark_weekly", name="GPT-5.3 Codex Spark weekly resets",
+        value_fn=lambda a: _absolute_reset(a.reset_spark_weekly),
+        attrs_fn=lambda a: _reset_attrs(a.reset_spark_weekly, a), codex_lb_only=True,
     ),
     CodexRatesSensorDescription(
         key="reset_credits",
@@ -166,7 +195,13 @@ ACCOUNT_SENSORS: tuple[CodexRatesSensorDescription, ...] = (
 )
 
 _POOL_SENSOR_KEYS = frozenset(
-    {"remaining_5h", "remaining_weekly", "remaining_monthly"}
+    {
+        "remaining_5h",
+        "remaining_weekly",
+        "remaining_monthly",
+        "remaining_spark_5h",
+        "remaining_spark_weekly",
+    }
 )
 _ACCOUNT_SENSOR_KEYS = frozenset(desc.key for desc in ACCOUNT_SENSORS)
 _MONTHLY_SENSOR_KEYS = frozenset(
@@ -198,6 +233,34 @@ def _include_description(
     return True
 
 
+def _friendly_status(status: str | None) -> str:
+    """Keep machine status in attributes while making device pages readable."""
+    return {
+        "active": "✅ Active",
+        "quota_exceeded": "⛔ Quota exceeded",
+        "paused": "⏸ Paused",
+        "disabled": "⏹ Disabled",
+        "error": "⚠️ Error",
+    }.get((status or "unknown").lower(), "❔ Unknown")
+
+
+def _account_supports_description(account: AccountQuota, key: str) -> bool:
+    """Create quota entities only when this account actually reports that window."""
+    fields = {
+        "remaining_5h": account.remaining_5h,
+        "remaining_weekly": account.remaining_weekly,
+        "remaining_monthly": account.remaining_monthly,
+        "reset_5h": account.reset_5h,
+        "reset_weekly": account.reset_weekly,
+        "reset_monthly": account.reset_monthly,
+        "remaining_spark_5h": account.remaining_spark_5h,
+        "remaining_spark_weekly": account.remaining_spark_weekly,
+        "reset_spark_5h": account.reset_spark_5h,
+        "reset_spark_weekly": account.reset_spark_weekly,
+    }
+    return key not in fields or fields[key] is not None
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -224,23 +287,27 @@ async def async_setup_entry(
                 rich=rich,
                 is_codex_lb=is_codex_lb,
                 has_monthly=has_monthly,
-            ):
+            ) or not _account_supports_description(account, description.key):
                 continue
             entities.append(
                 CodexAccountSensor(coordinator, entry, account.account_id, description)
             )
 
     if is_codex_lb:
-        entities.append(CodexPoolSensor(coordinator, entry, "remaining_5h", "All accounts 5h remaining"))
-        entities.append(
-            CodexPoolSensor(coordinator, entry, "remaining_weekly", "All accounts weekly remaining")
-        )
+        if snapshot.pool and snapshot.pool.remaining_5h.sample_count:
+            entities.append(CodexPoolSensor(coordinator, entry, "remaining_5h", "All accounts 5h remaining"))
+        if snapshot.pool and snapshot.pool.remaining_weekly.sample_count:
+            entities.append(CodexPoolSensor(coordinator, entry, "remaining_weekly", "All accounts weekly remaining"))
         if has_monthly:
             entities.append(
                 CodexPoolSensor(
                     coordinator, entry, "remaining_monthly", "All accounts monthly remaining"
                 )
             )
+        if snapshot.pool and snapshot.pool.remaining_spark_5h.sample_count:
+            entities.append(CodexPoolSensor(coordinator, entry, "remaining_spark_5h", "All accounts GPT-5.3 Codex Spark 5h remaining"))
+        if snapshot.pool and snapshot.pool.remaining_spark_weekly.sample_count:
+            entities.append(CodexPoolSensor(coordinator, entry, "remaining_spark_weekly", "All accounts GPT-5.3 Codex Spark weekly remaining"))
 
     async_add_entities(entities)
     cleanup_orphan_devices(hass, entry, snapshot)
@@ -252,25 +319,40 @@ async def async_setup_entry(
         cleanup_orphan_devices(hass, entry, coordinator.data)
         monthly_now = snapshot_has_monthly(coordinator.data)
         existing = {
-            (e.account_id if isinstance(e, CodexAccountSensor) else None)
+            (e.account_id, e.entity_description.key)
             for e in entities
             if isinstance(e, CodexAccountSensor)
         }
         new_entities: list[SensorEntity] = []
         for account in coordinator.data.accounts:
-            if account.account_id in existing:
-                continue
             for description in ACCOUNT_SENSORS:
                 if not _include_description(
                     description,
                     rich=rich,
                     is_codex_lb=is_codex_lb,
                     has_monthly=monthly_now,
-                ):
+                ) or not _account_supports_description(account, description.key):
+                    continue
+                if (account.account_id, description.key) in existing:
                     continue
                 new_entities.append(
                     CodexAccountSensor(coordinator, entry, account.account_id, description)
                 )
+        if is_codex_lb and coordinator.data.pool is not None:
+            pool_windows = (
+                ("remaining_5h", "All accounts 5h remaining"),
+                ("remaining_weekly", "All accounts weekly remaining"),
+                ("remaining_monthly", "All accounts monthly remaining"),
+                ("remaining_spark_5h", "All accounts GPT-5.3 Codex Spark 5h remaining"),
+                ("remaining_spark_weekly", "All accounts GPT-5.3 Codex Spark weekly remaining"),
+            )
+            existing_pool_keys = {
+                entity._key for entity in entities if isinstance(entity, CodexPoolSensor)
+            }
+            for key, name in pool_windows:
+                window = CodexPoolSensor(coordinator, entry, key, name)._window()
+                if window is not None and window.sample_count and key not in existing_pool_keys:
+                    new_entities.append(CodexPoolSensor(coordinator, entry, key, name))
         if new_entities:
             entities.extend(new_entities)
             async_add_entities(new_entities)
@@ -385,7 +467,13 @@ def cleanup_orphan_devices(
             sensor_key = sensor_key_from_unique_id(entry.entry_id, unique_id)
             if account_id is None or sensor_key is None:
                 continue
-            if account_id not in live or sensor_key not in allowed_keys:
+            account = next((item for item in snapshot.accounts if item.account_id == account_id), None)
+            unsupported_window = account is not None and not _account_supports_description(account, sensor_key)
+            if account_id not in live or sensor_key not in allowed_keys or unsupported_window:
+                # Do not erase a user-disabled entity's preference/history merely
+                # because this API response no longer exposes its quota window.
+                if getattr(entity, "disabled_by", None) is not None and unsupported_window:
+                    continue
                 entity_reg.async_remove(entity.entity_id)
 
     return removed
@@ -502,6 +590,10 @@ class CodexPoolSensor(CoordinatorEntity[CodexRatesCoordinator], SensorEntity):
             return data.pool.remaining_5h
         if self._key == "remaining_weekly":
             return data.pool.remaining_weekly
+        if self._key == "remaining_spark_5h":
+            return data.pool.remaining_spark_5h
+        if self._key == "remaining_spark_weekly":
+            return data.pool.remaining_spark_weekly
         return data.pool.remaining_monthly
 
     @property
@@ -527,4 +619,8 @@ class CodexPoolSensor(CoordinatorEntity[CodexRatesCoordinator], SensorEntity):
             attrs[ATTR_BY_MINUTES] = {
                 str(minutes): mean for minutes, mean in window.by_minutes.items()
             }
+        if window.weighted_capacity is not None:
+            attrs["weighted_capacity"] = window.weighted_capacity
+        attrs["weighting_method"] = window.weighting_method
+        attrs["missing_weight_count"] = window.missing_weight_count
         return attrs

@@ -203,6 +203,29 @@ async def test_codex_lb_maps_camel_case_accounts(aiohttp_client) -> None:
 
 
 @pytest.mark.asyncio
+async def test_codex_lb_maps_spark_quota_and_omits_absent_accounts(aiohttp_client) -> None:
+    async def accounts(request: web.Request) -> web.Response:
+        return web.json_response({"accounts": [
+            {"accountId": "pro", "status": "quota_exceeded", "capacityCreditsPrimary": 1500,
+             "additionalQuotas": [{"quotaKey": "codex_spark", "primaryWindow": {"usedPercent": 0, "resetAt": 1789494235, "windowMinutes": 300}, "secondaryWindow": {"usedPercent": 100, "resetAt": 1789807641, "windowMinutes": 10080}}]},
+            {"accountId": "team", "status": "quota_exceeded", "capacityCreditsPrimary": 225},
+        ]})
+
+    app = web.Application()
+    app.router.add_get("/api/accounts", accounts)
+    client = await aiohttp_client(app)
+    async with aiohttp.ClientSession() as session:
+        snapshot = await CodexLbProvider(session, base_url=str(client.make_url("/")).rstrip("/"))._fetch_accounts()
+
+    assert snapshot.accounts[0].remaining_spark_5h == 100
+    assert snapshot.accounts[0].remaining_spark_weekly == 0
+    assert snapshot.accounts[1].remaining_spark_5h is None
+    assert snapshot.pool is not None
+    assert snapshot.pool.remaining_spark_5h.mean == 100
+    assert snapshot.pool.remaining_spark_5h.sample_count == 1
+
+
+@pytest.mark.asyncio
 async def test_codex_lb_guest_login(aiohttp_client) -> None:
     state = {"authed": False}
 

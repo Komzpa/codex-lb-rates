@@ -27,6 +27,56 @@ from custom_components.codex_rates.sensor import (
 )
 
 
+@pytest.mark.parametrize("window", ["5h", "weekly", "monthly", "spark_5h", "spark_weekly"])
+def test_remaining_sensor_exposes_its_own_reset_timestamp(window) -> None:
+    from custom_components.codex_rates.sensor import CodexAccountSensor
+
+    when = datetime(2026, 10, 15, 23, 30, tzinfo=timezone.utc)
+    account = AccountQuota(account_id="a", **{f"reset_{window}": when})
+    description = next(d for d in ACCOUNT_SENSORS if d.key == f"remaining_{window}")
+    sensor = CodexAccountSensor(
+        SimpleNamespace(data=ProviderSnapshot(accounts=[account])),
+        SimpleNamespace(entry_id="test"), "a", description,
+    )
+    assert sensor.extra_state_attributes["resets_at"] == "2026-10-15T23:30:00+00:00"
+    setattr(account, f"reset_{window}", None)
+    assert "resets_at" not in sensor.extra_state_attributes
+
+
+@pytest.mark.parametrize("window", ["5h", "weekly", "monthly", "spark_5h", "spark_weekly"])
+def test_pool_reset_uses_next_measured_account_and_keeps_unknown_times(window) -> None:
+    from custom_components.codex_rates.models import compute_pool_aggregate
+    from custom_components.codex_rates.sensor import CodexPoolSensor
+
+    # Past timestamps must not hide the next upcoming account reset.
+    past = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    first = datetime(2099, 1, 1)  # Naive provider times are treated as UTC.
+    later = datetime(2099, 1, 2, tzinfo=timezone.utc)
+    accounts = [
+        AccountQuota(account_id="later", **{f"remaining_{window}": 70, f"reset_{window}": later}),
+        AccountQuota(account_id="first", **{f"remaining_{window}": 20, f"reset_{window}": first}),
+        AccountQuota(account_id="past", **{f"remaining_{window}": 0, f"reset_{window}": past}),
+        AccountQuota(account_id="unknown", **{f"remaining_{window}": 100}),
+        AccountQuota(account_id="unmeasured", **{f"reset_{window}": past}),
+        AccountQuota(account_id="invalid", **{f"remaining_{window}": float("nan"), f"reset_{window}": past}),
+    ]
+    snapshot = ProviderSnapshot(accounts=accounts, pool=compute_pool_aggregate(accounts))
+    sensor = CodexPoolSensor(SimpleNamespace(data=snapshot), SimpleNamespace(entry_id="test"),
+                             f"remaining_{window}", "Pool")
+    attrs = sensor.extra_state_attributes
+    assert attrs["next_reset_at"] == "2099-01-01T00:00:00+00:00"
+    assert attrs["reset_sample_count"] == 3
+    assert attrs["sample_count"] == 4
+    assert "resets_at" not in attrs  # A pool has no single shared reset.
+    for account in accounts:
+        setattr(account, f"reset_{window}", past)
+    assert sensor.extra_state_attributes["next_reset_at"] == "2000-01-01T00:00:00+00:00"
+    for account in accounts:
+        setattr(account, f"reset_{window}", None)
+    assert "next_reset_at" not in sensor.extra_state_attributes
+    assert sensor.extra_state_attributes["reset_sample_count"] == 0
+
+
 def test_reset_display_toggle_countdown_and_absolute(monkeypatch) -> None:
     from homeassistant.util import dt as dt_util
 

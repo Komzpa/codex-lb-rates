@@ -60,6 +60,7 @@ Account remaining sensors can include:
 | `email` | Account email when available |
 | `used_percent` | Used percentage when available (provider-reported when present; otherwise may be derived from remaining) |
 | `window_minutes` | Duration reported for that quota window |
+| `resets_at` | Exact ISO-8601 reset timestamp for the same window, when reported |
 | `quota_model` | Present on Spark sensors; currently `gpt-5.3-codex-spark` |
 
 A provider can report a remaining value without every optional attribute.
@@ -173,6 +174,8 @@ Pool remaining sensors can include:
 | `account_count` | Total accounts in the Codex-LB snapshot |
 | `active_count` | Accounts whose normalized status is active |
 | `sample_count` | Accounts that actually reported this quota window |
+| `next_reset_at` | Earliest upcoming reset among accounts with measured quota and a known reset time; if all known times are overdue, the most recent overdue timestamp |
+| `reset_sample_count` | Measured accounts with a reported reset timestamp (including overdue times); compare with `sample_count` for coverage |
 | `missing_quota_count` | Accounts in the snapshot without a value for this window |
 | `window_minutes` | Shared duration when reporting accounts agree |
 | `by_minutes` | Per-duration aggregate values when accounts report mixed window lengths |
@@ -182,6 +185,8 @@ Pool remaining sensors can include:
 | `quota_model` | Spark model identifier on Spark pool sensors |
 
 When accounts report different durations for the same logical slot, the pool sensor keeps all measured accounts and exposes the split in `by_minutes` rather than silently dropping one account type.
+
+Pool accounts reset independently. `next_reset_at` does **not** mean the entire pool refills at once, and accounts without a reported reset time are excluded from this timing. These reset attributes are also available on pool used-% sensors. No reset timestamp is invented when the provider omits it.
 
 ## Optional windows appearing or disappearing
 

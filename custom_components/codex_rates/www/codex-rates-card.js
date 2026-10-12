@@ -16,11 +16,11 @@
   const CARD_TYPE = "codex-rates-card";
   const EDITOR_TYPE = "codex-rates-card-editor";
   // Bump when editor/card surface changes so console + digest cache-bust clearly.
-  const CARD_VERSION = "1.1.1";
+  const CARD_VERSION = "1.2.0";
 
   /** @param {number} value */
   function clampPercent(value) {
-    if (Number.isNaN(value)) return null;
+    if (!Number.isFinite(value)) return null;
     return Math.max(0, Math.min(100, value));
   }
 
@@ -82,6 +82,37 @@
     return Number.isInteger(num) ? String(num) : num.toFixed(1);
   }
 
+  /** Format provider timestamps; never infer a reset from the quota percentage. */
+  function formatReset(stateObj, mode, hass) {
+    if (parseRemaining(stateObj?.state) === null) return "Unavailable";
+    const attrs = stateObj.attributes || {};
+    const pool = attrs.next_reset_at !== undefined || attrs.reset_sample_count !== undefined;
+    const timestamp = pool ? attrs.next_reset_at : attrs.resets_at;
+    const reset = typeof timestamp === "string" && timestamp.trim() ? Date.parse(timestamp) : NaN;
+    if (!Number.isFinite(reset)) return "Reset time unavailable";
+    if (reset <= Date.now()) return pool ? "Next reset due · awaiting update" : "Reset due · awaiting update";
+    const prefix = pool ? "Next reset" : "Resets";
+    if (mode === "absolute") {
+      const locale = hass?.locale;
+      const options = {
+        weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+        timeZone: locale?.time_zone === "local" ? undefined : hass?.config?.time_zone,
+      };
+      if (locale?.time_format === "24") options.hourCycle = "h23";
+      if (locale?.time_format === "12") options.hourCycle = "h12";
+      if (locale?.time_format === "system") {
+        options.hourCycle = new Intl.DateTimeFormat(undefined, { hour: "numeric" }).resolvedOptions().hourCycle;
+      }
+      return `${prefix} at ${new Intl.DateTimeFormat(locale?.language || undefined, options).format(reset)}`;
+    }
+    const minutes = Math.ceil((reset - Date.now()) / 60000);
+    const days = Math.floor(minutes / 1440);
+    const hours = Math.floor((minutes % 1440) / 60);
+    const mins = String(minutes % 60).padStart(2, "0");
+    const duration = days ? `${days}d ${String(hours).padStart(2, "0")}h ${mins}m` : `${hours}h ${mins}m`;
+    return `${pool ? "Next reset" : "Resets"} in ${duration}`;
+  }
+
   /**
    * Object-form `entities` rows stay YAML-only — the multi entity selector
    * expects string[]. Throwing disables the visual editor for that config.
@@ -103,6 +134,10 @@
     switch (schema.name) {
       case "title":
         return "Title";
+      case "theme":
+        return "Theme";
+      case "reset_display":
+        return "Reset display";
       case "entity":
         return "Primary remaining entity";
       case "name":
@@ -123,6 +158,10 @@
     switch (schema.name) {
       case "entity":
         return "Large remaining-% value and progress bar. At least one of primary or additional entities is required.";
+      case "theme":
+        return "Optional card theme. Leave empty to use the dashboard theme.";
+      case "reset_display":
+        return "Countdown (default), reset date/time in Home Assistant's time zone, or hidden. Pools show the next known account reset.";
       case "name":
         return "Optional label for the primary entity only.";
       case "entities":
@@ -137,6 +176,15 @@
 
   const CONFIG_FORM_SCHEMA = [
     { name: "title", selector: { text: {} } },
+    { name: "theme", selector: { theme: {} } },
+    {
+      name: "reset_display",
+      selector: { select: { mode: "dropdown", options: [
+        { value: "countdown", label: "Countdown" },
+        { value: "absolute", label: "Reset date/time" },
+        { value: "hidden", label: "Hidden" },
+      ] } },
+    },
     {
       name: "entity",
       selector: {
@@ -257,6 +305,12 @@
       /** @type {any} */
       this._hass = null;
       this._root = this.attachShadow({ mode: "open" });
+      this._style = this._root.appendChild(document.createElement("style"));
+      this._card = this._root.appendChild(document.createElement("ha-card"));
+      this._content = this._card.appendChild(document.createElement("div"));
+      this._content.className = "content";
+      this._themeKeys = [];
+      this._timer = undefined;
     }
 
     static getStubConfig() {
@@ -287,14 +341,58 @@
       if (!entities.length) {
         throw new Error("Set at least one remaining-% entity");
       }
+      if (config.reset_display && !["countdown", "absolute", "hidden"].includes(config.reset_display)) {
+        throw new Error("reset_display must be countdown, absolute, or hidden");
+      }
       this._config = { ...config, _entities: entities };
+      this._applyTheme();
+      this._syncTimer();
       this._render();
     }
 
     /** @param {any} hass */
     set hass(hass) {
       this._hass = hass;
+      this._applyTheme();
       this._render();
+    }
+
+    connectedCallback() {
+      this._syncTimer();
+      this._updateResetTimes();
+    }
+
+    disconnectedCallback() {
+      clearInterval(this._timer);
+      this._timer = undefined;
+    }
+
+    _syncTimer() {
+      this.disconnectedCallback();
+      if (this.isConnected && this._config && (this._config.reset_display || "countdown") === "countdown") {
+        this._timer = setInterval(() => this._updateResetTimes(), 60000);
+      }
+    }
+
+    _updateResetTimes() {
+      for (const element of this._content.querySelectorAll(".reset[data-entity]")) {
+        element.textContent = formatReset(this._hass?.states?.[element.dataset.entity], this._config?.reset_display, this._hass);
+      }
+    }
+
+    _applyTheme() {
+      const theme = this._hass?.themes?.themes?.[this._config?.theme];
+      const { modes, ...base } = theme || {};
+      const mode = this._hass?.themes?.darkMode ? "dark" : "light";
+      const variables = { ...base, ...modes?.[mode] };
+      for (const key of this._themeKeys) this.style.removeProperty(`--${key}`);
+      this._themeKeys = Object.keys(variables);
+      for (const [key, value] of Object.entries(variables)) this.style.setProperty(`--${key}`, String(value));
+    }
+
+    _resetHtml(entity, stateObj, index) {
+      if (this._config.reset_display === "hidden") return "";
+      return `<span id="reset-${index}" class="reset" data-entity="${this._escape(entity)}">${this._escape(formatReset(stateObj, this._config.reset_display, this._hass))}</span>`;
     }
 
     getCardSize() {
@@ -330,31 +428,30 @@
 
       const attrs = primaryState?.attributes || {};
       const metaParts = [];
-      const min = formatOptionalNumber(attrs.min);
-      const max = formatOptionalNumber(attrs.max);
-      if (min !== null && max !== null) metaParts.push(`min ${min}% · max ${max}%`);
       const samples = formatOptionalNumber(attrs.sample_count);
       if (samples !== null) metaParts.push(`${samples} measured`);
       const weighting = attrs.weighting_method ? String(attrs.weighting_method) : null;
       if (weighting) metaParts.push(weighting.replaceAll("_", " "));
+      if (Number.isFinite(attrs.reset_sample_count) && Number.isFinite(attrs.sample_count) && attrs.reset_sample_count < attrs.sample_count) {
+        metaParts.push(`reset times for ${attrs.reset_sample_count}/${attrs.sample_count} accounts`);
+      }
 
       const rowsHtml = rest
-        .map((row) => {
+        .map((row, index) => {
           const stateObj = this._hass?.states?.[row.entity];
           const value = parseRemaining(stateObj?.state);
           const label =
             row.name || stateObj?.attributes?.friendly_name || row.entity;
           const rowColor = bandColor(value, thresholds);
           const display = value === null ? "—" : `${value.toFixed(value % 1 ? 1 : 0)}%`;
-          const unavailable =
-            !stateObj ||
-            stateObj.state === "unavailable" ||
-            stateObj.state === "unknown";
+          const unavailable = value === null;
           return `
-            <div class="row${unavailable ? " muted" : ""}">
-              <span class="row-name">${this._escape(label)}</span>
+            <button type="button" class="row${unavailable ? " muted" : ""}" data-entity="${this._escape(row.entity)}"
+                    ${this._config.reset_display === "hidden" ? "" : `aria-describedby="reset-${index + 1}"`}
+                    aria-label="${this._escape(label)}: ${display}. More info">
+              <span class="row-details"><span class="row-name">${this._escape(label)}</span>${this._resetHtml(row.entity, stateObj, index + 1)}</span>
               <span class="row-value" style="color:${rowColor}">${display}</span>
-            </div>
+            </button>
           `;
         })
         .join("");
@@ -364,8 +461,7 @@
           ? "—"
           : `${primaryValue.toFixed(primaryValue % 1 ? 1 : 0)}%`;
 
-      this._root.innerHTML = `
-        <style>
+      this._style.textContent = `
           :host {
             display: block;
           }
@@ -373,6 +469,20 @@
             --codex-accent: ${color};
             padding: 16px;
             overflow: hidden;
+          }
+          button {
+            width: 100%;
+            background: none;
+            border: none;
+            padding: 0;
+            color: inherit;
+            font: inherit;
+            text-align: start;
+            cursor: pointer;
+          }
+          button:focus-visible {
+            outline: 2px solid var(--primary-color);
+            outline-offset: 3px;
           }
           .header {
             display: flex;
@@ -384,13 +494,14 @@
           .title {
             font-size: 1.05rem;
             font-weight: 500;
-            color: var(--primary-text-color);
+            color: var(--ha-card-header-color, var(--primary-text-color));
             line-height: 1.3;
           }
           .subtitle {
             font-size: 0.8rem;
             color: var(--secondary-text-color);
             margin-top: 2px;
+            overflow-wrap: anywhere;
           }
           .hero {
             display: flex;
@@ -433,6 +544,15 @@
             color: var(--secondary-text-color);
             margin-bottom: ${rowsHtml ? "12px" : "0"};
           }
+          .reset {
+            display: block;
+            font-size: 0.75rem;
+            line-height: 1.5;
+            color: var(--secondary-text-color);
+            font-variant-numeric: tabular-nums;
+            overflow-wrap: anywhere;
+          }
+          .primary-reset { margin-bottom: 8px; }
           .rows {
             display: flex;
             flex-direction: column;
@@ -451,11 +571,13 @@
             color: var(--disabled-text-color) !important;
           }
           .row-name {
+            display: block;
             color: var(--primary-text-color);
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
           }
+          .row-details { min-width: 0; }
           .row-value {
             font-weight: 600;
             font-variant-numeric: tabular-nums;
@@ -466,23 +588,27 @@
             font-size: 0.85rem;
             margin-top: 8px;
           }
-        </style>
-        <ha-card>
+      `;
+      const focusedEntity = this._root.activeElement?.dataset?.entity;
+      this._content.innerHTML = `
           <div class="header">
             <div>
               <div class="title">${this._escape(title)}</div>
               <div class="subtitle">${this._escape(primaryName)}</div>
             </div>
           </div>
-          <div class="hero">
+          <button type="button" class="hero" data-entity="${this._escape(primary.entity)}"
+                  ${this._config.reset_display === "hidden" ? "" : 'aria-describedby="reset-0"'}
+                  aria-label="${this._escape(primaryName)}: ${primaryDisplay}. More info">
             <div class="pct">${primaryDisplay}</div>
-            <div class="pct-label">remaining</div>
-          </div>
+            <div class="pct-label">${primaryValue === null ? "Unavailable" : "remaining"}</div>
+          </button>
           <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"
-               aria-valuenow="${primaryValue === null ? "" : primaryValue}"
+               ${primaryValue === null ? 'aria-valuetext="Unavailable"' : `aria-valuenow="${primaryValue}"`}
                aria-label="${this._escape(primaryName)} remaining">
             <span></span>
           </div>
+          ${this._config.reset_display === "hidden" ? "" : `<div class="primary-reset">${this._resetHtml(primary.entity, primaryState, 0)}</div>`}
           ${
             metaParts.length
               ? `<div class="meta">${this._escape(metaParts.join(" · "))}</div>`
@@ -496,8 +622,15 @@
                 ? `<div class="warning">Entity not found: ${this._escape(primary.entity)}</div>`
                 : ""
           }
-        </ha-card>
       `;
+      for (const button of this._content.querySelectorAll("button[data-entity]")) {
+        if (focusedEntity && button.dataset.entity === focusedEntity) button.focus({ preventScroll: true });
+        button.addEventListener("click", () => {
+          this.dispatchEvent(new CustomEvent("hass-more-info", {
+            detail: { entityId: button.dataset.entity }, bubbles: true, composed: true,
+          }));
+        });
+      }
     }
 
     /** @param {string} value */

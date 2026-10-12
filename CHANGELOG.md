@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.0](https://github.com/uniskela/codex-lb-rates/compare/v0.9.1...v0.10.0) (2026-10-12)
+
+
+### Features
+
+* add card themes and reset countdowns ([f490c4d](https://github.com/uniskela/codex-lb-rates/commit/f490c4d47abeee01ae96495aebc9864071f7b25a))
+* add card themes and reset countdowns ([e1d5815](https://github.com/uniskela/codex-lb-rates/commit/e1d5815af57d97c0b148d45b459632ddfe797923))
+
 ## [0.9.1](https://github.com/uniskela/codex-lb-rates/compare/v0.9.0...v0.9.1) (2026-09-29)
 
 

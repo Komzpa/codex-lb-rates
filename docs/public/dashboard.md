@@ -27,6 +27,8 @@ On a recent Home Assistant frontend (≈2023.5+), the card supports the **Visual
 | Field | Config key | Notes |
 |---|---|---|
 | Title | `title` | Optional card heading |
+| Theme | `theme` | Installed Home Assistant theme; leave empty to inherit the view/dashboard theme |
+| Reset display | `reset_display` | `countdown` (default), `absolute`, or `hidden`; applies to every row |
 | Primary remaining entity | `entity` | Hero remaining-% sensor |
 | Primary name override | `name` | Optional label for the primary entity only |
 | Additional remaining entities | `entities` | Multi-select of extra remaining-% sensors (string entity IDs) |
@@ -39,6 +41,7 @@ type: custom:codex-rates-card
 title: Codex pool
 entity: sensor.codex_lb_pool_all_accounts_5h_remaining
 name: Pool primary
+reset_display: countdown
 entities:
   - sensor.codex_lb_pool_all_accounts_weekly_remaining
 green: 50
@@ -62,10 +65,66 @@ entities:
 Behaviour:
 
 - The first entity (`entity`, or the first `entities` item) is the large remaining-% value and progress bar.
-- Extra `entities` rows show additional remaining-% sensors (other pool windows or accounts).
+- Extra `entities` rows show additional remaining-% sensors (other pool windows or accounts) and their reset timing, including weekly, monthly, and Spark windows when reported.
 - Optional `green` / `yellow` thresholds default to `50` / `20` (same “plenty / getting low / little left” bands as the gauge examples below).
-- When the primary entity is a pool sensor, the card surfaces `min` / `max`, `sample_count`, and `weighting_method` when those attributes exist.
+- The primary pool shows measured-account counts and weighting, plus incomplete reset coverage when applicable.
+- Tap/click the large quota or an extra row to open that entity's **More info** dialog. Keyboard users can Tab to a quota and press Enter or Space.
 - Top-level `name` (primary only) is available in both the visual form and YAML; per-row names under `entities` are YAML-only.
+
+### BREAKING CHANGE: pool card display
+
+After updating, existing custom-card configurations show reset timing in place of the primary pool's visible `min` / `max` values. Users who relied on those values in the card will need to access them elsewhere. The sensor attributes, quota values, and entity IDs are retained.
+
+To access `min` / `max`, tap the pool quota to open its **More info** dialog, or display those attributes using attribute rows in a standard Entities card. Setting `reset_display: hidden` hides reset timing; it does not restore the old min/max display.
+
+### Reset countdowns and times
+
+Your existing card configuration automatically shows minute-resolution reset countdowns after updating the integration:
+
+- Account: **Resets in 4h 07m**.
+- Weekly account: **Resets in 3d 02h 05m**.
+- Pool: **Next reset in 4h 07m** — the earliest upcoming reset among measured accounts with known times. A pool does not reset all accounts together.
+
+Choose **Reset date/time** in the visual editor, or set `reset_display: absolute`, to show the date and time using your frontend language, 12/24-hour preference, and time zone preference (Home Assistant's configured zone, or your browser's local zone). The card setting is independent of the integration's reset-sensor display option. Set `reset_display: hidden` to omit reset lines.
+
+Countdowns round up to the next minute and update every minute while the card is attached. When a timestamp passes, the card says **Reset due · awaiting update** until new provider data arrives; it does not assume the percentage has refilled. Missing timestamps show **Reset time unavailable**, and unavailable quota sensors show **Unavailable**.
+
+The card reads `resets_at` directly from account remaining sensors and `next_reset_at` from pool sensors. It also works with other remaining-% sensors that provide these attributes; it does not guess a sibling entity ID. Restart Home Assistant after the integration update so the new attributes are published.
+
+### Themes and frosted glass styling
+
+The **Theme** picker lists themes installed in Home Assistant, like the picker on standard cards. A blank theme inherits the surrounding view/dashboard theme. An explicit theme applies its variables, including its active light/dark mode, only to this card:
+
+```yaml
+type: custom:codex-rates-card
+title: Codex remaining
+theme: Frosted Glass
+entity: sensor.codex_lb_pool_all_accounts_5h_remaining
+entities:
+  - sensor.codex_lb_pool_all_accounts_weekly_remaining
+reset_display: countdown
+```
+
+The card uses Home Assistant's `ha-card` for its background, border, radius, shadow, and backdrop filter. It preserves that container during quota updates so external card styling can remain attached.
+
+If your other cards use individual `card_mod` gradients and blur, selecting the view theme alone will not reproduce those per-card styles. With [card-mod](https://github.com/thomasloven/lovelace-card-mod) installed, add the same treatment to this card:
+
+```yaml
+card_mod:
+  style: |
+    ha-card {
+      background: linear-gradient(135deg, rgba(24, 28, 36, 0.72), rgba(18, 22, 30, 0.58));
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 18px;
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
+      --primary-text-color: rgba(255, 255, 255, 0.98);
+      --secondary-text-color: rgba(255, 255, 255, 0.68);
+    }
+```
+
+This is an optional dashboard styling dependency; the integration does not install card-mod or a theme for you.
 
 Hard-refresh the browser (or clear the dashboard cache) after an integration update if an older card bundle is still cached.
 
@@ -73,7 +132,7 @@ If the editor still says **Visual editor not supported** after updating to a rel
 
 1. Confirm the integration is on **0.8.0+** (or a build that includes the visual editor).
 2. Restart Home Assistant, then hard-refresh the dashboard (Ctrl/Cmd+Shift+R).
-3. Open the browser console — you should see `Codex-LB Rates card v1.1.1` (or newer).
+3. Open the browser console — you should see `Codex-LB Rates card v1.2.0` (or newer).
 4. Under **Settings → Dashboards → Resources**, confirm the module URL is `/codex_rates/codex-rates-card.js?v=…` (a changing `?v=` digest). If you added the resource manually without `?v=`, append a new query (for example `?v=2`) once so the browser drops the stale module.
 
 ## Simple account card

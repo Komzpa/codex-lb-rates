@@ -33,6 +33,20 @@ def test_card_bundle_exists() -> None:
     assert "LiveCard.getConfigElement" in text
 
 
+def test_card_behaviour() -> None:
+    """Run the bundle against quota states using Node's built-in test runner."""
+    import shutil
+    import subprocess
+
+    if shutil.which("node") is None:
+        pytest.skip("node not available")
+    result = subprocess.run(
+        ["node", "--test", str(Path(__file__).with_name("card.test.cjs"))],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_assert_config_rejects_object_entities(tmp_path: Path) -> None:
     """assertConfig must throw for non-string entities items (visual-editor guard)."""
     import json

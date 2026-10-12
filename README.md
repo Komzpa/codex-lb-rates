@@ -18,7 +18,7 @@ Home Assistant integration for monitoring **Codex quota remaining and reset time
 - **Optional rich diagnostics** — plan, credit balance, last refresh, and request-usage totals.
 - **Optional used-% sensors** — Configure option (off by default) adds used-percentage entities; remaining % stays primary for dashboards and the quota-alert blueprint.
 - **Quota-alert blueprint** — low, exceeded, and refreshed notifications with hysteresis and remembered alert state.
-- **Bundled Lovelace card** — optional `custom:codex-rates-card` for pool and remaining-% sensors (served from the integration `www/` folder), with a visual config editor for common options.
+- **Bundled Lovelace card** — optional `custom:codex-rates-card` for pool and remaining-% sensors, with a theme picker, minute-resolution reset countdowns or local reset times for every row, and a visual config editor. Tap a quota to open More info.
 
 ## Install
 

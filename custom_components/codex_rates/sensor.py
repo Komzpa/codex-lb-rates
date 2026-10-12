@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
+from math import isfinite
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -974,6 +975,11 @@ class CodexAccountSensor(CoordinatorEntity[CodexRatesCoordinator], SensorEntity)
         if attrs_fn is None:
             return {ATTR_ACCOUNT_ID: account.account_id, ATTR_EMAIL: account.email}
         attrs = attrs_fn(account)
+        if self.entity_description.key.startswith("remaining_"):
+            reset_key = self.entity_description.key.replace("remaining_", "reset_", 1)
+            when = getattr(account, reset_key)
+            if when is not None:
+                attrs[ATTR_RESETS_AT] = when.isoformat()
         if "spark" in self.entity_description.key:
             attrs["quota_model"] = "gpt-5.3-codex-spark"
         return attrs
@@ -1073,4 +1079,20 @@ class CodexPoolSensor(CoordinatorEntity[CodexRatesCoordinator], SensorEntity):
                 attrs["capacity_credits"] = window.weighted_capacity
             attrs["weighting_method"] = window.weighting_method
         attrs["missing_weight_count"] = window.missing_weight_count
+        remaining_key = _pool_aggregate_key(self._key)
+        reset_key = remaining_key.replace("remaining_", "reset_", 1)
+        resets = [
+            when if when.tzinfo is not None else when.replace(tzinfo=timezone.utc)
+            for account in data.accounts
+            if (remaining := getattr(account, remaining_key)) is not None
+            and isfinite(remaining)
+            and (when := getattr(account, reset_key)) is not None
+        ]
+        attrs["reset_sample_count"] = len(resets)
+        if resets:
+            now = datetime.now(timezone.utc)
+            upcoming = [when for when in resets if when > now]
+            # A pool resets account by account; overdue times must not hide future ones.
+            when = min(upcoming) if upcoming else max(resets)
+            attrs["next_reset_at"] = when.isoformat()
         return attrs

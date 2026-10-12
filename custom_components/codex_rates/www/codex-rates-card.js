@@ -229,6 +229,169 @@
     };
   }
 
+  /** @param {any} hass */
+  function installedThemes(hass) {
+    return Object.keys(hass?.themes?.themes || {}).sort((a, b) =>
+      a.localeCompare(b, undefined, { sensitivity: "base" })
+    );
+  }
+
+  // ha-theme-picker snapshots uiContext once and stays empty in this editor.
+  // List hass.themes instead — that is the catalog the card applies.
+  /** @param {any} hass */
+  function editorSchema(hass) {
+    const names = installedThemes(hass);
+    return {
+      key: names.join("\0"),
+      schema: CONFIG_FORM_SCHEMA.filter((field) => !["entity", "name", "entities"].includes(field.name)).map((field) =>
+        field.name !== "theme"
+          ? field
+          : {
+              name: "theme",
+              selector: {
+                select: {
+                  mode: "dropdown",
+                  options: names.map((name) => ({ value: name, label: name })),
+                },
+              },
+            }
+      ),
+    };
+  }
+
+  /** @param {any} hass @param {string[]} extra */
+  function sensorChoices(hass, extra) {
+    const ids = new Set(Object.keys(hass?.states || {}).filter((id) => id.startsWith("sensor.")));
+    for (const id of extra) if (id) ids.add(id);
+    return [...ids].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })).map((id) => ({
+      value: id,
+      label: hass?.states?.[id]?.attributes?.friendly_name || id,
+    }));
+  }
+
+  /** @param {any} hass @param {string} id */
+  function selectedChoice(hass, id) {
+    if (!id) return [];
+    return [{ value: id, label: hass?.states?.[id]?.attributes?.friendly_name || id }];
+  }
+
+  /** @param {HTMLSelectElement} select @param {{ value: string, label: string }[]} choices */
+  function fillEntitySelect(select, choices) {
+    select.replaceChildren();
+    const blank = document.createElement("option");
+    blank.value = "";
+    blank.textContent = "Select entity";
+    select.appendChild(blank);
+    for (const choice of choices) {
+      const option = document.createElement("option");
+      option.value = choice.value;
+      option.textContent = choice.label;
+      select.appendChild(option);
+    }
+  }
+
+  /** @param {Record<string, unknown> | null | undefined} config */
+  function rowsFromConfig(config) {
+    /** @type {{ entity: string, name: string }[]} */
+    const rows = [];
+    const entities = /** @type {unknown[]} */ (Array.isArray(config?.entities) ? config.entities : []);
+    if (config?.entity) rows.push({ entity: String(config.entity), name: config.name ? String(config.name) : "" });
+    else if (config?.name && entities.length) rows.push({ entity: "", name: String(config.name) });
+    for (const item of entities) {
+      if (typeof item === "string") rows.push({ entity: item, name: "" });
+      else if (item && typeof item === "object" && "entity" in item && item.entity) {
+        rows.push({ entity: String(item.entity), name: "name" in item && item.name ? String(item.name) : "" });
+      }
+    }
+    if (!rows.length) rows.push({ entity: "", name: config?.name ? String(config.name) : "" });
+    return rows;
+  }
+
+  /** @param {{ entity: string, name: string }} row */
+  function storedRow(row) {
+    if (!row.entity) return null;
+    return row.name.trim() ? { entity: row.entity, name: row.name } : row.entity;
+  }
+
+  /**
+   * @param {Record<string, unknown>} config
+   * @param {{ entity: string, name: string }[]} rows
+   */
+  function applyRows(config, rows) {
+    const list = rows.length ? rows : [{ entity: "", name: "" }];
+    let [head, ...rest] = list;
+    const next = { ...config };
+    if (!head.entity && !head.name.trim()) {
+      const promoted = rest.find((row) => row.entity);
+      if (promoted) {
+        rest = rest.filter((row) => row !== promoted);
+        head = promoted;
+      }
+    }
+    if (head.entity) next.entity = head.entity;
+    else delete next.entity;
+    if (head.name.trim()) next.name = head.name;
+    else delete next.name;
+    const extras = rest.map(storedRow).filter(Boolean);
+    if (extras.length) next.entities = extras;
+    else delete next.entities;
+    return next;
+  }
+
+  /** Indexes of rows applyRows will keep, in persisted order. */
+  function survivedIndexes(current) {
+    const list = current.length ? current : [{ entity: "", name: "" }];
+    const [head, ...rest] = list;
+    if (!head.entity && !head.name.trim()) {
+      const promotedAt = rest.findIndex((row) => row.entity);
+      if (promotedAt >= 0) {
+        const indexes = [promotedAt + 1];
+        rest.forEach((row, index) => {
+          if (index !== promotedAt && row.entity) indexes.push(index + 1);
+        });
+        return indexes;
+      }
+    }
+    const indexes = [0];
+    rest.forEach((row, index) => {
+      if (row.entity) indexes.push(index + 1);
+    });
+    return indexes;
+  }
+
+  /** Keep extra rows that have no sensor yet, in their place among the rows that were saved. */
+  function withDrafts(persisted, current) {
+    if (!current.length) return persisted.map((row) => ({ entity: row.entity, name: row.name }));
+    const survived = new Set(survivedIndexes(current));
+    const rows = [];
+    let next = 0;
+    current.forEach((row, index) => {
+      if (survived.has(index)) {
+        const kept = persisted[next++];
+        rows.push({ entity: kept.entity, name: kept.name });
+        return;
+      }
+      if (index > 0 && !row.entity) rows.push({ entity: "", name: row.name });
+    });
+    return rows.length ? rows : persisted.map((row) => ({ entity: row.entity, name: row.name }));
+  }
+
+  /** @param {Record<string, unknown>} config @param {{ entity: string, name: string }[]} current */
+  function settleRows(config, current) {
+    let rows = current.length ? current : [{ entity: "", name: "" }];
+    let saved = applyRows(config, rows);
+    if (config.type) saved.type = config.type;
+    for (let pass = 0; pass < 3; pass++) {
+      const persisted = rowsFromConfig(saved);
+      const next = withDrafts(persisted, rows);
+      if (JSON.stringify(next) === JSON.stringify(rows)) return { config: saved, rows, persisted };
+      rows = next;
+      saved = applyRows(config, rows);
+      if (config.type) saved.type = config.type;
+    }
+    return { config: saved, rows, persisted: rowsFromConfig(saved) };
+  }
+
   /**
    * Compact visual editor — HA prefers getConfigElement over getConfigForm.
    * Uses frontend ha-form (always present in the card editor dialog).
@@ -242,16 +405,39 @@
       this._hass = undefined;
       /** @type {any} */
       this._form = undefined;
+      this._formBottom = undefined;
+      this._rowsHost = undefined;
+      /** @type {{ entity: string, name: string }[]} */
+      this._rows = [];
+      /** @type {HTMLSelectElement[]} */
+      this._entitySelects = [];
+      /** @type {HTMLInputElement[]} */
+      this._nameInputs = [];
+      /** @type {HTMLButtonElement[]} */
+      this._removeButtons = [];
+      /** @type {HTMLButtonElement | undefined} */
+      this._addButton = undefined;
+      this._themeKey = "";
+      this._rowsKey = "";
+      /** @type {Set<string>} */
+      this._sensorSet = new Set();
+      this._sensorCount = -1;
     }
 
     /** @param {Record<string, unknown>} config */
     setConfig(config) {
-      assertConfig(config);
       this._config = { ...config };
       this._ensureForm();
-      if (this._form) {
-        this._form.data = this._config;
+      const rows = rowsFromConfig(config);
+      const key = JSON.stringify(rows);
+      // The dashboard echoes config-changed back through setConfig. Rebuilding
+      // here would destroy the focused label after every keystroke.
+      if (key !== this._rowsKey) {
+        this._rowsKey = key;
+        this._rows = rows;
+        this._renderRows();
       }
+      this._setFormData();
     }
 
     /** @param {any} hass */
@@ -259,41 +445,183 @@
       this._hass = hass;
       if (this._form) {
         this._form.hass = hass;
+        this._formBottom.hass = hass;
+        this._syncSchema();
       }
+      const ids = Object.keys(hass?.states || {}).filter((id) => id.startsWith("sensor."));
+      const changed = ids.length !== this._sensorCount || ids.some((id) => !this._sensorSet.has(id));
+      if (!changed || this._rowFocused()) return;
+      this._sensorSet = new Set(ids);
+      this._sensorCount = ids.length;
+      this._renderRows();
+    }
+
+    _rowFocused() {
+      const active = typeof document !== "undefined" ? document.activeElement : null;
+      return !!(active && this._rowsHost?.contains?.(active));
+    }
+
+    _syncRowsKey() {
+      this._rowsKey = JSON.stringify(rowsFromConfig(applyRows(this._config, this._rows)));
+    }
+
+    _setFormData() {
+      if (this._form) this._form.data = this._config;
+      if (this._formBottom) this._formBottom.data = this._config;
+    }
+
+    _syncSchema() {
+      const next = editorSchema(this._hass);
+      if (next.key === this._themeKey) return;
+      this._themeKey = next.key;
+      this._form.schema = next.schema.filter((field) => ["title", "theme", "reset_display"].includes(field.name));
     }
 
     connectedCallback() {
       this._ensureForm();
+      this._renderRows();
     }
 
-    _ensureForm() {
-      if (this._form || !this.isConnected) return;
-      const form = document.createElement("ha-form");
-      form.schema = CONFIG_FORM_SCHEMA;
+    /** @param {HTMLElement} form */
+    _bindForm(form) {
       form.computeLabel = computeLabel;
       form.computeHelper = computeHelper;
       form.data = this._config;
-      if (this._hass) {
-        form.hass = this._hass;
-      }
+      if (this._hass) form.hass = this._hass;
       form.addEventListener("value-changed", (ev) => {
         ev.stopPropagation();
         const value = ev.detail?.value || {};
         const config = { ...this._config, ...value };
-        if (this._config.type) {
-          config.type = this._config.type;
-        }
+        if (this._config.type) config.type = this._config.type;
+        if (!value.theme) delete config.theme;
         this._config = config;
-        this.dispatchEvent(
-          new CustomEvent("config-changed", {
-            detail: { config },
-            bubbles: true,
-            composed: true,
-          })
-        );
+        this._setFormData();
+        this.dispatchEvent(new CustomEvent("config-changed", { detail: { config }, bubbles: true, composed: true }));
       });
-      this._form = form;
-      this.appendChild(form);
+    }
+
+    _ensureForm() {
+      if (this._form || !this.isConnected) return;
+      const next = editorSchema(this._hass);
+      this._themeKey = next.key;
+      const top = /** @type {any} */ (document.createElement("ha-form"));
+      top.schema = next.schema.filter((field) => ["title", "theme", "reset_display"].includes(field.name));
+      this._bindForm(top);
+      this._rowsHost = document.createElement("div");
+      const bottom = /** @type {any} */ (document.createElement("ha-form"));
+      bottom.schema = next.schema.filter((field) => !["title", "theme", "reset_display"].includes(field.name));
+      this._bindForm(bottom);
+      this._form = top;
+      this._formBottom = bottom;
+      this.append(top, this._rowsHost, bottom);
+    }
+
+    _emitRows() {
+      const settled = settleRows(this._config, this._rows);
+      this._config = settled.config;
+      if (JSON.stringify(settled.rows) !== JSON.stringify(this._rows)) {
+        const active = typeof document !== "undefined" ? document.activeElement : null;
+        const index = this._entitySelects.indexOf(active);
+        this._rows = settled.rows;
+        this._renderRows();
+        if (index >= 0) this._entitySelects[Math.min(index, this._entitySelects.length - 1)]?.focus?.();
+      } else {
+        this._rowsKey = JSON.stringify(settled.persisted);
+      }
+      this._setFormData();
+      this.dispatchEvent(new CustomEvent("config-changed", { detail: { config: settled.config }, bubbles: true, composed: true }));
+    }
+
+    _renderRows() {
+      if (!this._rowsHost || !this._rows) return;
+      this._rowsHost.replaceChildren();
+      this._entitySelects = [];
+      this._nameInputs = [];
+      this._removeButtons = [];
+      this._rows.forEach((row, index) => {
+        const block = document.createElement("div");
+        block.style.margin = "12px 0";
+        const select = /** @type {HTMLSelectElement} */ (document.createElement("select"));
+        const choicesFor = () => sensorChoices(this._hass, this._rows.map((item) => item.entity));
+        // ponytail: full option list only while focused; search/cap if opening the dropdown janks.
+        fillEntitySelect(select, selectedChoice(this._hass, row.entity));
+        select.value = row.entity;
+        select.addEventListener("focus", () => {
+          fillEntitySelect(select, choicesFor());
+          select.value = this._rows[index].entity;
+        });
+        select.addEventListener("blur", () => {
+          const current = this._rows[index].entity;
+          fillEntitySelect(select, selectedChoice(this._hass, current));
+          select.value = current;
+        });
+        select.addEventListener("change", (ev) => {
+          ev.stopPropagation();
+          this._rows[index].entity = select.value;
+          this._syncRowsKey();
+          this._emitRows();
+        });
+        const input = /** @type {HTMLInputElement} */ (document.createElement("input"));
+        input.value = row.name;
+        input.placeholder = this._hass?.states?.[row.entity]?.attributes?.friendly_name || "Entity name";
+        input.addEventListener("input", (ev) => {
+          ev.stopPropagation();
+          this._rows[index].name = input.value;
+          this._syncRowsKey();
+          if (index === 0 || this._rows[index].entity) this._emitRows();
+        });
+        input.addEventListener("change", (ev) => {
+          ev.stopPropagation();
+          input.value = input.value.trim();
+          this._rows[index].name = input.value;
+          this._syncRowsKey();
+          if (index === 0 || this._rows[index].entity) this._emitRows();
+        });
+        block.append(
+          this._field(index === 0 ? "Primary entity" : "Additional entity", select),
+          this._field("Label", input),
+        );
+        if (index > 0) {
+          const remove = /** @type {HTMLButtonElement} */ (document.createElement("button"));
+          remove.type = "button";
+          remove.textContent = "Remove";
+          remove.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            this._rows.splice(index, 1);
+            this._renderRows();
+            this._emitRows();
+          });
+          block.appendChild(remove);
+          this._removeButtons.push(remove);
+        }
+        this._entitySelects.push(select);
+        this._nameInputs.push(input);
+        this._rowsHost.appendChild(block);
+      });
+      const add = /** @type {HTMLButtonElement} */ (document.createElement("button"));
+      add.type = "button";
+      add.textContent = "Add entity";
+      add.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        this._rows.push({ entity: "", name: "" });
+        this._renderRows();
+      });
+      this._addButton = add;
+      this._rowsHost.appendChild(add);
+      this._syncRowsKey();
+    }
+
+    /** @param {string} caption @param {HTMLElement} control */
+    _field(caption, control) {
+      const label = document.createElement("label");
+      label.style.display = "flex";
+      label.style.flexDirection = "column";
+      label.style.gap = "4px";
+      label.style.marginBottom = "8px";
+      label.append(caption, control);
+      control.style.width = "100%";
+      control.style.boxSizing = "border-box";
+      return label;
     }
   }
 

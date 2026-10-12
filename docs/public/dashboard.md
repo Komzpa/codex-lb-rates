@@ -67,9 +67,15 @@ Behaviour:
 - The first entity (`entity`, or the first `entities` item) is the large remaining-% value and progress bar.
 - Extra `entities` rows show additional remaining-% sensors (other pool windows or accounts) and their reset timing, including weekly, monthly, and Spark windows when reported.
 - Optional `green` / `yellow` thresholds default to `50` / `20` (same “plenty / getting low / little left” bands as the gauge examples below).
-- Reset timing replaces the old pool `min` / `max` display. Those attributes remain available in the sensor's More info dialog. The primary pool still shows measured-account counts and weighting, plus incomplete reset coverage when applicable.
+- The primary pool shows measured-account counts and weighting, plus incomplete reset coverage when applicable.
 - Tap/click the large quota or an extra row to open that entity's **More info** dialog. Keyboard users can Tab to a quota and press Enter or Space.
 - Top-level `name` (primary only) is available in both the visual form and YAML; per-row names under `entities` are YAML-only.
+
+### BREAKING CHANGE: pool card display
+
+After updating, existing custom-card configurations show reset timing in place of the primary pool's visible `min` / `max` values. Users who relied on those values in the card will need to access them elsewhere. The sensor attributes, quota values, and entity IDs are retained.
+
+To access `min` / `max`, tap the pool quota to open its **More info** dialog, or display those attributes using attribute rows in a standard Entities card. Setting `reset_display: hidden` hides reset timing; it does not restore the old min/max display.
 
 ### Reset countdowns and times
 

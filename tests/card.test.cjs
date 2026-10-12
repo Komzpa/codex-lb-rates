@@ -12,6 +12,7 @@ function setup(config = {}) {
   let now = NOW;
   const elements = new Map();
   const timers = new Map();
+  let nextTimerId = 0;
   class Element {
     constructor() {
       this.style = {
@@ -40,7 +41,11 @@ function setup(config = {}) {
     Date: class extends Date { static now() { return now; } },
     Intl,
     CustomEvent: class { constructor(type, options) { this.type = type; Object.assign(this, options); } },
-    setInterval: (fn, delay) => { timers.set(1, { fn, delay }); return 1; },
+    setInterval: (fn, delay) => {
+      const id = ++nextTimerId;
+      timers.set(id, { fn, delay });
+      return id;
+    },
     clearInterval: (id) => timers.delete(id),
   });
   const Card = elements.get("codex-rates-card");
@@ -156,7 +161,7 @@ test("countdown timer is started once and released on disconnect or mode change"
   card.connectedCallback();
   card.connectedCallback();
   assert.equal(timers.size, 1);
-  assert.equal(timers.get(1).delay, 60000);
+  assert.equal(timers.values().next().value.delay, 60000);
   card.disconnectedCallback();
   assert.equal(timers.size, 0);
   card.connectedCallback();
@@ -170,7 +175,7 @@ test("timer refreshes displayed countdown without replacing the card contents", 
   card._content.querySelectorAll = () => [element];
   const originalHtml = html(card);
   setNow(NOW + 60000);
-  timers.get(1).fn();
+  timers.values().next().value.fn();
   assert.equal(element.textContent, "Next reset in 4h 06m");
   assert.equal(html(card), originalHtml);
 });

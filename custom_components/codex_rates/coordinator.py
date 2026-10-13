@@ -39,6 +39,7 @@ from .const import (
     DOMAIN,
     MAX_RATE_LIMIT_COOLDOWN,
     MIN_POLL_INTERVAL,
+    TRANSIENT_FAILURE_GRACE_POLLS,
     MODE_CODEX_LB,
 )
 from .exceptions import (
@@ -239,9 +240,34 @@ class CodexRatesCoordinator(DataUpdateCoordinator[ProviderSnapshot]):
             seconds = self._apply_rate_limit_cooldown(err)
             raise self._rate_limit_update_failed(remaining_seconds=seconds) from err
         except CodexRatesApiError as err:
-            raise UpdateFailed(_error_message(err)) from err
+            return self._keep_snapshot_or_fail(err)
         except Exception as err:  # noqa: BLE001
-            raise UpdateFailed(_error_message(err)) from err
+            return self._keep_snapshot_or_fail(err)
+
+    def _keep_snapshot_or_fail(self, err: BaseException) -> ProviderSnapshot:
+        """Serve the last snapshot through a brief outage, then fail.
+
+        A single timed-out poll would otherwise mark every entity unavailable
+        until the next poll succeeds.
+        """
+        previous = getattr(self, "data", None)
+        last_ok = self.last_successful_poll_at
+        grace = timedelta(
+            seconds=self.poll_interval_seconds * TRANSIENT_FAILURE_GRACE_POLLS
+        )
+        if (
+            previous is not None
+            and last_ok is not None
+            and datetime.now(timezone.utc) - last_ok < grace
+        ):
+            _LOGGER.warning(
+                "Poll failed (%s); keeping the snapshot from %s for up to %ss",
+                _error_message(err),
+                last_ok.isoformat(),
+                int(grace.total_seconds()),
+            )
+            return previous
+        raise UpdateFailed(_error_message(err)) from err
 
     def rebuild_provider(self) -> None:
         """Drop cached provider after options/data change."""

@@ -42,6 +42,9 @@ AUTH_METHOD_TOKENS = "tokens"
 
 DEFAULT_POLL_INTERVAL = 60
 MIN_POLL_INTERVAL = 30
+# Failed polls tolerated before entities go unavailable, counted in poll intervals
+# since the last success. One slow Codex-LB response should not blank every sensor.
+TRANSIENT_FAILURE_GRACE_POLLS = 3
 # HTTP 429 cooldown when Retry-After is absent or unusable.
 DEFAULT_RATE_LIMIT_COOLDOWN = 60
 # Cap temporary backoff so a pathological Retry-After cannot stall forever.
